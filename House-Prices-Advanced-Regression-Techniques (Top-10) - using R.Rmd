@@ -1,10 +1,5 @@
 ---
-title: "House Prices: Advanced Regression Techniques (Top 10%)"
-output: 
-  html_document:
-    toc: true
-    toc_depth: 3
-author: Pau Roger Puig-Sureda
+title: "House Prices: Advanced Regression Techniques"
 ---
 
 ```{r setup, include=FALSE}
@@ -23,13 +18,6 @@ library(xgboost)
 ```
 
 ## Introduction
-
-For more details on the dataset and the competition see <https://www.kaggle.com/c/house-prices-advanced-regression-techniques>
-The most important part of this competition is, by far, feature engineering, where I put most of my efforts.
-
-## What is my goal?
-
-- I want to predict predict the final price of each home.
 
 ## Data Reading and preparation
 
