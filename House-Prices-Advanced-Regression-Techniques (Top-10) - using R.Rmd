@@ -1,0 +1,474 @@
+---
+title: "House Prices: Advanced Regression Techniques (Top 10%)"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+author: Pau Roger Puig-Sureda
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(glmnet)
+library(caret)
+library(dummies)
+library(stringr)
+library(e1071)
+library(xgboost)
+```
+
+## Introduction
+
+For more details on the dataset and the competition see <https://www.kaggle.com/c/house-prices-advanced-regression-techniques>
+The most important part of this competition is, by far, feature engineering, where I put most of my efforts.
+
+## What is my goal?
+
+- I want to predict predict the final price of each home.
+
+## Data Reading and preparation
+
+The dataset is offered in two separated fields, one for the training and another one for the test set. 
+
+```{r Load Data}
+training_data = read.csv(file = file.path("train.csv"))
+test_data = read.csv(file = file.path("test.csv"))
+```
+
+## Join datasets
+
+```{r Joinning datasets}
+test_data$SalePrice <- 0
+dataset <- rbind(training_data, test_data)
+```
+
+# Feature Engineering
+
+## Hunting NA's
+Our dataset is filled with missing values, therefore, before we can build any predictive model we'll clean our data by filling in all NA's with more appropriate values.
+
+Counting columns with null values.
+
+```{r NAs discovery}
+na.cols <- which(colSums(is.na(dataset)) > 0)
+sort(colSums(sapply(dataset[na.cols], is.na)), decreasing = TRUE)
+paste('There are', length(na.cols), 'columns with missing values')
+```
+
+First, we deal with numerical values. According to the documentation we can safely assume that `NAs` in these variables means 0.
+
+```{r Train NA Imputation for Numeric Values}
+# LotFrontage : NA most likely means no lot frontage
+dataset$LotFrontage[is.na(dataset$LotFrontage)] <- 0
+dataset$MasVnrArea[is.na(dataset$MasVnrArea)] <- 0
+dataset$BsmtFinSF1[is.na(dataset$BsmtFinSF1)] <- 0
+dataset$BsmtFinSF2[is.na(dataset$BsmtFinSF2)] <- 0
+dataset$BsmtUnfSF[is.na(dataset$BsmtUnfSF)] <- 0
+dataset$TotalBsmtSF[is.na(dataset$TotalBsmtSF)] <- 0
+dataset$BsmtFullBath[is.na(dataset$BsmtFullBath)] <- 0
+dataset$BsmtHalfBath[is.na(dataset$BsmtHalfBath)] <- 0
+dataset$GarageCars[is.na(dataset$GarageCars)] <- 0
+dataset$GarageArea[is.na(dataset$GarageArea)] <- 0
+```
+
+One special case is the variable "GarageYrBlt". We can assume that the year that the garage was built is the same than when the house itself was built.
+
+```{r }
+dataset$GarageYrBlt[is.na(dataset$GarageYrBlt)] <- dataset$YearBuilt[is.na(dataset$GarageYrBlt)]
+```
+
+```{r }
+summary(dataset$GarageYrBlt)
+```
+
+Typo!
+
+```{r}
+dataset$GarageYrBlt[dataset$GarageYrBlt==2207] <- 2007
+```
+
+Now we deal with `NAs` in categorical values.
+
+`NAs` in this dataset might be due to: 
+
+1) Missing data. 
+
+2) Empty values for this feature (for instance, a house does not have Garage).
+
+Firstly, we'll address "real" NAs, that is, values which are actually missing. To that end, we will impute them with the most common value for this feature.
+
+```{r}
+dataset$KitchenQual[is.na(dataset$KitchenQual)] <- names(sort(-table(dataset$KitchenQual)))[1]
+dataset$MSZoning[is.na(dataset$MSZoning)] <- names(sort(-table(dataset$MSZoning)))[1]
+dataset$SaleType[is.na(dataset$SaleType)] <- names(sort(-table(dataset$SaleType)))[1]
+dataset$Exterior1st[is.na(dataset$Exterior1st)] <- names(sort(-table(dataset$Exterior1st)))[1]
+dataset$Exterior2nd[is.na(dataset$Exterior2nd)] <- names(sort(-table(dataset$Exterior2nd)))[1]
+dataset$Functional[is.na(dataset$Functional)] <- names(sort(-table(dataset$Functional)))[1]
+```
+
+For empty values, we just change the `NA` value to a new value - 'No'.
+
+```{r}
+# For the rest we change NAs to their actual meaning
+dataset$Alley = factor(dataset$Alley, levels=c(levels(dataset$Alley), "No"))
+dataset$Alley[is.na(dataset$Alley)] = "No"
+
+# Bsmt : NA for basement features is "no basement"
+dataset$BsmtQual = factor(dataset$BsmtQual, levels=c(levels(dataset$BsmtQual), "No"))
+dataset$BsmtQual[is.na(dataset$BsmtQual)] = "No"
+
+dataset$BsmtCond = factor(dataset$BsmtCond, levels=c(levels(dataset$BsmtCond), "No"))
+dataset$BsmtCond[is.na(dataset$BsmtCond)] = "No"
+
+dataset$BsmtExposure[is.na(dataset$BsmtExposure)] = "No"
+
+dataset$BsmtFinType1 = factor(dataset$BsmtFinType1, levels=c(levels(dataset$BsmtFinType1), "No"))
+dataset$BsmtFinType1[is.na(dataset$BsmtFinType1)] = "No"
+
+dataset$BsmtFinType2 = factor(dataset$BsmtFinType2, levels=c(levels(dataset$BsmtFinType2), "No"))
+dataset$BsmtFinType2[is.na(dataset$BsmtFinType2)] = "No"
+
+# Fence : NA means "no fence"
+dataset$Fence = factor(dataset$Fence, levels=c(levels(dataset$Fence), "No"))
+dataset$Fence[is.na(dataset$Fence)] = "No"
+
+# FireplaceQu : NA means "no fireplace"
+dataset$FireplaceQu = factor(dataset$FireplaceQu, levels=c(levels(dataset$FireplaceQu), "No"))
+dataset$FireplaceQu[is.na(dataset$FireplaceQu)] = "No"
+
+# Garage : NA for garage features is "no garage"
+dataset$GarageType = factor(dataset$GarageType, levels=c(levels(dataset$GarageType), "No"))
+dataset$GarageType[is.na(dataset$GarageType)] = "No"
+
+dataset$GarageFinish = factor(dataset$GarageFinish, levels=c(levels(dataset$GarageFinish), "No"))
+dataset$GarageFinish[is.na(dataset$GarageFinish)] = "No"
+
+dataset$GarageQual = factor(dataset$GarageQual, levels=c(levels(dataset$GarageQual), "No"))
+dataset$GarageQual[is.na(dataset$GarageQual)] = "No"
+
+dataset$GarageCond = factor(dataset$GarageCond, levels=c(levels(dataset$GarageCond), "No"))
+dataset$GarageCond[is.na(dataset$GarageCond)] = "No"
+
+# MasVnrType : NA most likely means no veneer
+dataset$MasVnrType = factor(dataset$MasVnrType, levels=c(levels(dataset$MasVnrType), "No"))
+dataset$MasVnrType[is.na(dataset$MasVnrType)] = "No"
+
+# MiscFeature : NA = "no misc feature"
+dataset$MiscFeature = factor(dataset$MiscFeature, levels=c(levels(dataset$MiscFeature), "No"))
+dataset$MiscFeature[is.na(dataset$MiscFeature)] = "No"
+
+# PoolQC : data description says NA means "no pool"
+dataset$PoolQC = factor(dataset$PoolQC, levels=c(levels(dataset$PoolQC), "No"))
+dataset$PoolQC[is.na(dataset$PoolQC)] = "No"
+
+# Electrical : NA means "UNK"
+dataset$Electrical = factor(dataset$Electrical, levels=c(levels(dataset$Electrical), "UNK"))
+dataset$Electrical[is.na(dataset$Electrical)] = "UNK"
+
+# GarageYrBlt: It seems reasonable that most houses would build a garage when the house itself was built.
+idx <- which(is.na(dataset$GarageYrBlt))
+dataset[idx, 'GarageYrBlt'] <- dataset[idx, 'YearBuilt']
+```
+
+We remove meaningless features and incomplete cases.
+
+```{r NA transformation}
+dataset$Utilities <- NULL
+dataset$Id <- NULL
+dataset
+```
+
+We now check again if we have null values.
+
+```{r }
+na.cols <- which(colSums(is.na(dataset)) > 0)
+paste('There are now', length(na.cols), 'columns with missing values')
+```
+
+## Outliers
+
+Let's plot these features against the target variable
+
+```{r Dealing with outliers}
+plot(training_data$SalePrice, training_data$GrLivArea)
+plot(training_data$SalePrice, training_data$LotArea)
+plot(training_data$SalePrice, training_data$X1stFlrSF)
+plot(training_data$SalePrice, training_data$X2ndFlrSF)
+plot(training_data$SalePrice, training_data$LowQualFinSF)
+plot(training_data$SalePrice, training_data$TotalBsmtSF)
+plot(training_data$SalePrice, training_data$MiscVal)
+```
+
+By reviewing the plots we see that `X2ndFlrSF` does not have significant outliers. `MiscVal` and `LowQualFinSF` does not present outliers as such. 
+
+We transform the rest of the outliers by assigning them the mean of each variable.
+
+```{r}
+dataset$GrLivArea[dataset$GrLivArea>4000] <- mean(dataset$GrLivArea)%>%as.numeric
+dataset$LotArea[dataset$LotArea>35000] <- mean(dataset$LotArea)%>%as.numeric
+dataset$X1stFlrSF[dataset$X1stFlrSF>3000] <- mean(dataset$X1stFlrSF)%>%as.numeric
+dataset$TotalBsmtSF[dataset$TotalBsmtSF>2900] <- mean(dataset$TotalBsmtSF)%>%as.numeric
+```
+
+## Character variables into continuous numerical variables
+
+There are some categories which are clearly a ranking.
+
+```{r Character values into numerical factors}
+dataset$ExterQual<- recode(dataset$ExterQual,"None"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=18)
+dataset$ExterCond<- recode(dataset$ExterCond,"None"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=6)
+dataset$BsmtQual<- recode(dataset$BsmtQual,"No"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=18)
+dataset$BsmtCond<- recode(dataset$BsmtCond,"No"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=6)
+dataset$BsmtExposure<- recode(dataset$BsmtExposure,"No"=0,"No"=1,"Mn"=2,"Av"=3,"Gd"=6)
+dataset$BsmtFinType1<- recode(dataset$BsmtFinType1,"No"=0,"Unf"=1,"LwQ"=2,"Rec"=3,"BLQ"=4,"ALQ"=5,"GLQ"=6)
+dataset$BsmtFinType2<- recode(dataset$BsmtFinType2,"No"=0,"Unf"=1,"LwQ"=2,"Rec"=3,"BLQ"=4,"ALQ"=5,"GLQ"=6)
+dataset$HeatingQC<- recode(dataset$HeatingQC,"None"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=5)
+dataset$KitchenQual<- recode(dataset$KitchenQual,"None"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=6)
+dataset$Functional<- recode(dataset$Functional,"None"=0,"Sev"=1,"Maj2"=2,"Maj1"=3,"Mod"=4,"Min2"=5,"Min1"=6,"Typ"=7)
+dataset$FireplaceQu<- recode(dataset$FireplaceQu,"No"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=6)
+dataset$GarageFinish<- recode(dataset$GarageFinish,"No"=0,"Unf"=1,"RFn"=2,"Fin"=3)
+dataset$GarageQual<- recode(dataset$GarageQual,"No"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=18)
+dataset$GarageCond<- recode(dataset$GarageCond,"No"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=6)
+dataset$PoolQC<- recode(dataset$PoolQC,"No"=0,"Po"=1,"Fa"=2,"TA"=3,"Gd"=4,"Ex"=6)
+dataset$Fence<- recode(dataset$Fence,"No"=0,"MnWw"=1,"GdWo"=2,"MnPrv"=3,"GdPrv"=6)
+```
+
+In addition to capture their ranking meaning, we are going to create a new binary feature for each one of them to reward good and penalize bad qualities and conditions
+
+```{r}
+dataset['IsExterQualBad'] <- ifelse(dataset$ExterQual< 3, 1, 0)
+dataset['IsExterCondlBad'] <- ifelse(dataset$ExterCond< 3, 1, 0)
+dataset['IsBsmtQualBad'] <- ifelse(dataset$BsmtQual< 3, 1, 0)
+dataset['IsBsmtCondBad'] <- ifelse(dataset$BsmtCond< 3, 1, 0)
+dataset['IsBsmtExposureBad'] <- ifelse(dataset$BsmtExposure< 3, 1, 0)
+dataset['IsHeatingQCBad'] <- ifelse(dataset$HeatingQC< 3, 1, 0)
+dataset['IsKitchenQualBad'] <- ifelse(dataset$KitchenQual< 3, 1, 0)
+dataset['IsFireplaceQuBad'] <- ifelse(dataset$FireplaceQu< 3, 1, 0)
+dataset['IsGarageQualBad'] <- ifelse(dataset$GarageQual< 3, 1, 0)
+dataset['IsGarageCondBad'] <- ifelse(dataset$GarageCond< 3, 1, 0)
+dataset['IsPoolQCBad'] <- ifelse(dataset$PoolQC< 3, 1, 0)
+
+dataset['IsExterQualGood'] <- ifelse(dataset$ExterQual >= 3, 1, 0)
+dataset['IsExterCondlGood'] <- ifelse(dataset$ExterCond >= 3, 1, 0)
+dataset['IsBsmtQualGood'] <- ifelse(dataset$BsmtQual >= 3, 1, 0)
+dataset['IsBsmtCondGood'] <- ifelse(dataset$BsmtCond >= 3, 1, 0)
+dataset['IsBsmtExposureGood'] <- ifelse(dataset$BsmtExposure >= 3, 1, 0)
+dataset['IsHeatingQCGood'] <- ifelse(dataset$HeatingQC >= 3, 1, 0)
+dataset['IsKitchenQualGood'] <- ifelse(dataset$KitchenQual >= 3, 1, 0)
+dataset['IsFireplaceQuGood'] <- ifelse(dataset$FireplaceQu >= 3, 1, 0)
+dataset['IsGarageQualGood'] <- ifelse(dataset$GarageQual >= 3, 1, 0)
+dataset['IsGarageCondGood'] <- ifelse(dataset$GarageCond >= 3, 1, 0)
+dataset['IsPoolQCGood'] <- ifelse(dataset$PoolQC >= 3, 1, 0)
+```
+
+## New features
+
+```{r New variables}
+# Has been the house remodeled?: If the YearBuilt is different than the remodel year
+dataset['HasBeenRemodeled'] <- ifelse(dataset$YearRemodAdd == dataset$YearBuilt, 0, 1)
+
+# Has been the house been remodelled after the year it was sold?
+dataset['HasBeenRecentlyRemodeled'] <- ifelse(dataset$YearRemodAdd == dataset$YrSold, 0, 1) 
+
+# Has been the house sold the year it was built
+dataset['IsNewHouse'] <-ifelse(dataset$YearBuilt == dataset$YrSold, 1, 0) 
+
+# How old it is
+dataset['Age'] <- as.numeric(2010 - dataset$YearBuilt)
+
+# Time since last selling
+dataset['TimeSinceLastSelling'] <- as.numeric(2010 - dataset$YrSold)
+
+# Time since remodeled and sold 
+dataset['TimeSinceRemodeledAndSold'] <- as.numeric(dataset$YrSold - dataset$YearRemodAdd)
+
+areas <- c('LotFrontage', 'LotArea', 'MasVnrArea', 'BsmtFinSF1', 'BsmtFinSF2', 'BsmtUnfSF',
+               'TotalBsmtSF', 'X1stFlrSF', 'X2ndFlrSF', 'GrLivArea', 'GarageArea', 'WoodDeckSF', 
+               'OpenPorchSF', 'EnclosedPorch', 'X3SsnPorch', 'ScreenPorch', 'LowQualFinSF', 'PoolArea')
+
+# Total surface of the house, combining the area-related features
+dataset['TotalSF'] <- as.numeric(rowSums(dataset[,areas]))
+
+# Total surface of the house, combining the total inside surfacae
+dataset['TotalInsideSF'] <- as.numeric(dataset$X1stFlrSF + dataset$X2ndFlrSF)
+
+# There are more number of sales in April, May, June and July, which may indicate some stationality. we create a new variable indicating that the house has been sold in one of these months
+dataset['IsHotMonth'] = recode(dataset$MoSold,"1"=0,"2"=0,"3"=0,"4"=1,"5"=1, "6"=1, "7"=1, "8"=0, "9"=0, "10"=0, "11"=0, "12"=0)
+```
+
+## Binarizing Features
+
+There are some variables that can be encoded as binary because they mostly present a unique value.
+
+For instance, If we take a look to the `LotShape` value distribution, we can see that there are mainly two values: The house has or does not have a regular shape. Therefore, we can binarize these values according to this criteria.
+
+```{r}
+plot(dataset$LotShape)
+dataset$IsRegLotShape <- ifelse(dataset$LotShape == 'Reg', 1, 0)
+(dataset)
+```
+
+Similarly, we can binarize other values that present the same situation
+
+```{r}
+plot(dataset$LandContour)
+dataset['IsLandLvl'] <- ifelse(dataset$LandContour == 'Lvl', 1, 0)
+``` 
+
+```{r}
+plot(dataset$LandSlope)
+dataset['IsLandSlopeGtl'] <-  ifelse(dataset$LandSlope == 'Gtl', 1, 0)
+```
+
+```{r}
+plot(dataset$PavedDrive)
+dataset['HasPavedDrive'] <-  ifelse(dataset$PavedDrive == 'Y', 1, 0)
+```
+
+```{r}
+plot(dataset$Electrical)
+dataset['IsElectricalSBrkr'] <- ifelse(dataset$Electrical == 'SBrkr', 1, 0)
+
+```
+
+We can also binarize area-related features.
+
+```{r }
+area_features <- c('X2ndFlrSF', 'MasVnrArea', 'WoodDeckSF', 'OpenPorchSF', 'EnclosedPorch', 'X3SsnPorch', 'ScreenPorch', 'WoodDeckSF')
+
+for (area_feature in area_features){
+  dataset[str_c('Has',area_feature)] <- ifelse(dataset[,area_feature] != 0, 1, 0)
+}
+```
+
+We expect "rich" neighborhoods to include expensive houses.
+
+Therefore, I've create two new features. A binary feature to indicate if the house is in a rich neighborhood and a numerical feature to codify the ranking of the neighborhoods according to their median house value.
+
+```{r warning=FALSE, message=FALSE}
+training_data[,c('Neighborhood','SalePrice')] %>%
+  group_by(Neighborhood) %>%
+  summarise(avg = median(SalePrice, na.rm = TRUE)) %>%
+  arrange(avg) %>%
+  mutate(sorted = factor(Neighborhood, levels=Neighborhood)) %>%
+  ggplot(aes(x=sorted, y=avg)) +
+  geom_bar(stat = "identity") + 
+  labs(x='Neighborhood', y='Price') +
+  ylim(NA, 350000) + 
+  theme(axis.text.x = element_text(angle=90)) 
+
+
+richNeighborhood <- c('Crawfor', 'ClearCr', 'Veenker', 'Somerst', 'Timber', 'StoneBr', 'NridgeHt', 'NoRidge')
+dataset['IsNeighborhoodRich'] <- (dataset$Neighborhood %in% richNeighborhood) *1
+dataset$NeighborhoodScored <- recode(dataset$Neighborhood, 'MeadowV' = 0, 'IDOTRR' = 0, 'Sawyer' = 1, 'BrDale' = 1, 'OldTown' = 1, 'Edwards' = 1, 'BrkSide' = 1, 'Blueste' = 2, 'SWISU' = 2, 'NAmes' = 2, 'NPkVill' = 2, 'Mitchel' = 2,'SawyerW' = 3, 'Gilbert' = 3, 'NWAmes' = 3, 'Blmngtn' = 3, 'CollgCr' = 3, 'ClearCr' = 3, 'Crawfor' = 3, 'Veenker' = 4, 'Somerst' = 4, 'Timber' = 4, 'StoneBr' = 5, 'NoRidge' = 6, 'NridgHt' = 6)
+
+```
+
+
+## Polynomic degrees of more correlated features
+
+There are some features which are more related to the target variable. 
+
+```{r}
+dataset["OverallQual-s2"] <- sapply(dataset$OverallQual, function(x){x**2})
+dataset["OverallQual-s3"] <- sapply(dataset$OverallQual, function(x){x**3})
+dataset["OverallQual-Sq"] <- sqrt(dataset["OverallQual"])
+dataset["TotalSF-2"] <- sapply(dataset$TotalSF, function(x){x**2})
+dataset["TotalSF-3"] = sapply(dataset$TotalSF, function(x){x**3})
+dataset["TotalSF-Sq"] = sqrt(dataset["TotalSF"])
+dataset["GrLivArea-2"] = sapply(dataset$GrLivArea, function(x){x**2})
+dataset["GrLivArea-3"] = sapply(dataset$GrLivArea, function(x){x**3})
+dataset["GrLivArea-Sq"] = sqrt(dataset["GrLivArea"])
+dataset["ExterQual-2"] = sapply(dataset$ExterQual, function(x){x**2})
+dataset["ExterQual-3"] = sapply(dataset$ExterQual, function(x){x**3})
+dataset["ExterQual-Sq"] = sqrt(dataset["ExterQual"])
+dataset["GarageCars-2"] = sapply(dataset$GarageCars, function(x){x**2})
+dataset["GarageCars-3"] = sapply(dataset$GarageCars, function(x){x**3})
+dataset["GarageCars-Sq"] = sqrt(dataset["GarageCars"])
+dataset["KitchenQual-2"] = sapply(dataset$KitchenQual, function(x){x**2})
+dataset["KitchenQual-3"] = sapply(dataset$KitchenQual, function(x){x**3})
+dataset["KitchenQual-Sq"] = sqrt(dataset["KitchenQual"])
+```
+
+## Factorize features
+
+Some numerical features are actually categories.
+
+```{r Factorize features}
+dataset$MSSubClass <- as.factor(dataset$MSSubClass)
+dataset$MoSold <- as.factor(dataset$MoSold)
+dataset$YrSold <- as.factor(dataset$YrSold)
+```
+
+## Skewness
+
+Transform the target value applying log for official scoring.
+
+```{r Log transform the target for official scoring}
+dataset$SalePrice <- log(dataset$SalePrice)
+```
+
+```{r }
+column_types <- sapply(names(dataset),function(x){class(dataset[[x]])})
+numeric_columns <-names(column_types[column_types != "factor"])
+
+skew <- sapply(numeric_columns,function(x){skewness(dataset[[x]],na.rm = T)})
+
+dkskew <- skew[skew > 0.75]
+for (x in names(skew)) {
+  bc = BoxCoxTrans(dataset[[x]], lambda = 0.15) 
+  dataset[[x]] = predict(bc, dataset[[x]])
+}
+str(numeric_columns)
+```
+
+# Train, test splitting
+
+For facilitating the data cleaning and feature engineering we merged train and test datasets. We now split them again to create our final model.
+
+```{r Train test split}
+fe_training <- dataset[1:1460,]
+fe_test <- dataset[1461:2919,]
+```
+
+# Lasso Regression
+
+```{r Lasso Regression, warning=FALSE}
+set.seed(123)
+lasso <- cv.glmnet(x = data.matrix(fe_training[, - which(names(fe_training) %in% c('SalePrice'))]), 
+                   y = fe_training$SalePrice, nfolds = 10)
+plot(lasso)
+```
+
+As seen in the figure, lambda min is close to 0. In particular it is equal to:
+
+```{r}
+lasso$lambda.min
+```
+
+Cross-Validated error (RMSE)
+
+```{r}
+sqrt(lasso$cvm[lasso$lambda == lasso$lambda.min])
+```
+
+# Final Submission
+
+Final submission using lasso.
+
+```{r Final Submission}
+set.seed(46)
+lasso <-  cv.glmnet(x = data.matrix(fe_training[, - which(names(fe_training) %in% c('SalePrice'))]), y = fe_training$SalePrice, nfolds = 10)
+lasso_pred <- as.numeric(exp(predict(lasso, newx = data.matrix(fe_test[, - which(names(fe_test) %in% c('SalePrice'))]), s = "lambda.min"))-1)
+hist(lasso_pred, main="Histogram of Lasso Predictions", xlab = "Predictions")
+
+lasso_submission <- data.frame(Id = test_data$Id, SalePrice= (lasso_pred))
+colnames(lasso_submission) <-c("Id", "SalePrice")
+write.csv(lasso_submission, file = "lasso_submission.csv", row.names = FALSE) 
+```
+head(lasso_submission)
